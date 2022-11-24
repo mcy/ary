@@ -3,4 +3,9 @@ name = "ary"
 version = "0.1.0"
 edition = "2021"
 
-[dependencies]
+authors = ["Miguel Young de la Sota <mcyoung@mit.edu>"]
+description = "The array literal of the gods"
+homepage = "https://github.com/mcy/ary"
+repository = "https://github.com/mcy/ary"
+
+license = "Apache-2.0"
