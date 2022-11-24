@@ -12,7 +12,8 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-//! The array literal of the gods.
+//! `ary` - The array literal of the gods.
+//! =====
 //!
 //! Rust provides two syntaxes for array literals: `[a, b, c]`, and `[x; count]`.
 //! When building complex `const` arrays, having only these two forms can be
