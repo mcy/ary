@@ -85,12 +85,14 @@
 //! 
 //! ```compile_fail
 //! # use ary::ary;
-//! const GAP: &[i32; 10] = &ary![=>
+//! let gap: &[i32; 10] = &ary![=>
 //!   0..5: [1; 5],
 //!   // Element 5 is missing.
 //!   6..10: [2; 4],
 //! ];
 //! ```
+//! 
+//! This check occurs at compile time rather than at runtime.
 //! 
 //! # Caveats
 //! 
@@ -108,40 +110,59 @@
 #[macro_export]
 macro_rules! ary {
   ($($tt:tt)*) => {{
-    const LEN: (usize, bool) = {
-      let mut total: usize = 0;
-      let mut has_preinit = false;
-      total = total;  // Silence "unnecessary mut" warning without attributes.
-      has_preinit = has_preinit;
-      let _ = (total, has_preinit);
-      $crate::__compute_len!(@total, has_preinit => $($tt)*);
-      (total, has_preinit)
+    #[allow(unused_imports)]
+    use ::core::{
+      primitive::bool as __bool,
+      primitive::usize as __usize,
+      mem::MaybeUninit as __MaybeUninit,
+      option::Option as __Option,
+      option::Option::Some as __Some,
+      option::Option::None as __None,
     };
 
-    extern crate core;
-    const BITS: usize = usize::BITS as usize;
-    let mut uninit_arr = [core::mem::MaybeUninit::uninit(); LEN.0];
-    let mut is_init = [0usize; LEN.0 / BITS + 1];
-    uninit_arr = uninit_arr;
-    is_init = is_init;
-    let mut idx: usize = 0;
-    idx = idx;
-    $crate::__init!(uninit_arr, is_init, idx => $($tt)*);
-    let _ = idx;
+    // The `$cb!(..)` construction used below only works if `$cb:tt`, so
+    // we need to `use` the internal macro names to give them a single-token
+    // name.
+    #[allow(unused_imports)]
+    use $crate::{
+      __mark_init as __ary__mark_init,
+      __insert as __ary__insert,
+    };
 
-    if LEN.1 {
-      let mut i = 0;
-      while i < uninit_arr.len() {
-        assert!(
-          is_init[i / BITS] >> (i % BITS) & 1 == 1,
-          "failed to initialize at least one array element",
-        );
-        i += 1;
+    // NOTE: All variables that are not unconditionally used must be prefixed
+    // with _ to silence compiler warnings.
+
+    const LEN: (__usize, __bool) = {
+      let mut _total: __usize = 0;
+      let mut _has_preinit = false;
+      $crate::__compute_len!(@_total, _has_preinit => $($tt)*);
+      (_total, _has_preinit)
+    };
+
+    const _VERIFY_EVERY_SLOT_IS_INITIALIZED: () = {
+      if LEN.1 {
+        const BITS: __usize = __usize::BITS as __usize;
+        let mut _is_init = [0usize; LEN.0 / BITS + 1];
+        let mut _idx: __usize = 0;
+        $crate::__init!(__ary__mark_init, _is_init, LEN.0, _idx => $($tt)*);
+
+        let mut i = 0;
+        while i < LEN.0 {
+          assert!(
+            _is_init[i / BITS] >> (i % BITS) & 1 == 1,
+            "failed to initialize at least one array element",
+          );
+          i += 1;
+        }
       }
-    }
+    };
 
-    let arr = unsafe { core::mem::transmute(uninit_arr) };
-    $crate::__type_check(&uninit_arr, &arr);
+    let mut _uninit_arr = [__MaybeUninit::uninit(); LEN.0];
+    let mut _idx: __usize = 0;
+    $crate::__init!(__ary__insert, _uninit_arr, LEN.0, _idx => $($tt)*);
+
+    let arr = unsafe { ::core::mem::transmute(_uninit_arr) };
+    $crate::__type_check(&_uninit_arr, &arr);
     arr
   }};
 }
@@ -191,85 +212,92 @@ macro_rules! __compute_len {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __init {
-  ($arr:ident, $is_init:ident, $idx:ident => $e:expr; $n:expr $(=> $($tt:tt)*)?) => {{
-    let e = $e;
-    while $idx < $arr.len() {
-      extern crate core;
-      $arr[$idx] = core::mem::MaybeUninit::new(e);
-      $idx += 1;
-    }
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => $e:expr; $n:expr $(=> $($tt:tt)*)?) => {{
+    let _e = $e;
+    $idx += $cb!($arr, $total_len, __None, __None, (<), |_| _e);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
-  ($arr:ident, $is_init:ident, $idx:ident => in $e:expr; $n:expr $(=> $($tt:tt)*)?) => {{
-    let e = $e;
-    let n: usize = $n;
-    let mut i = 0;
-    while i < n {
-      let mut j = 0;
-      while j < e.len() {
-        extern crate core;
-        $arr[$idx] = core::mem::MaybeUninit::new(e[j]);
-        $idx += 1;
-        j += 1;
-      }
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => in $e:expr; $n:expr $(=> $($tt:tt)*)?) => {{
+    let _e = $e;
+    let _start = $idx;
+    let _n: __usize = $n;
+    $idx += $cb!($arr, $total_len, __Some($idx), __Some($idx + _n * _e.len()), (<), |_i| _e[(_i - _start) % _e.len()]);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
+  }};
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => $(,)? $(=> $($tt:tt)*)?) => {{
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
+  }};
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => in $e:expr $(, $($tt:tt)*)?) => {{
+    let _e = $e;
+    let _start = $idx;
+    $idx += $cb!($arr, $total_len, __Some($idx), __Some($idx + _e.len()), (<), |_i| _e[_i - _start]);
+    $crate::__init!($cb, $arr, $total_len, $idx => $($($tt)*)?);
+  }};
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => in $e:expr $(=> $($tt:tt)*)?) => {{
+    $crate::__init!($cb, $arr, $total_len, $idx => in $e);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
+  }};
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => $e:expr $(, $($tt:tt)*)?) => {{
+    let _e = $e;
+    $idx += $cb!($arr, $total_len, __Some($idx), __Some($idx + 1), (<), |_| _e);
+    $crate::__init!($cb, $arr, $total_len, $idx => $($($tt)*)?);
+  }};
+  ($cb:tt, $arr:ident, $total_len:expr, $idx:ident => $e:expr $(=> $($tt:tt)*)?) => {{
+    $crate::__init!($cb, $arr, $total_len, $idx => $e);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
+  }};
+}
+
+#[doc(hidden)]
+#[macro_export]
+macro_rules! __mark_init {
+  ($arr:ident, $total_len:expr, $start:expr, $end:expr, ($cmp:tt), |$i:tt| $v:expr) => {{
+    let start: __Option<__usize> = $start;
+    let start = match start {
+        __Some(x) => x,
+        __None => 0,
+    };
+
+    let end: __Option<__usize> = $end;
+    let end = match end {
+        __Some(x) => x,
+        __None => $total_len,
+    };
+
+    let mut i = start;
+    while i $cmp end {
+      $arr[i / (__usize::BITS as __usize)] |= (1 << (i % __usize::BITS as __usize));
       i += 1;
     }
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
-  }};
-  ($arr:ident, $is_init:ident, $idx:ident => $(,)? $(=> $($tt:tt)*)?) => {{
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
-  }};
-  ($arr:ident, $is_init:ident, $idx:ident => in $e:expr $(, $($tt:tt)*)?) => {{
-    let e = $e;
-    let mut i = 0;
-    while i < $e.len() {
-      extern crate core;
-      $arr[$idx + i] = core::mem::MaybeUninit::new(e[i]);
-      i += 1;
-    }
-    $idx += i;
-    $crate::__init!($arr, $is_init, $idx => $($($tt)*)?);
-  }};
-  ($arr:ident, $is_init:ident, $idx:ident => in $e:expr $(=> $($tt:tt)*)?) => {{
-    $crate::__init!($arr, $is_init, $idx => in $e);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
-  }};
-  ($arr:ident, $is_init:ident, $idx:ident => $e:expr $(, $($tt:tt)*)?) => {{
-    extern crate core;
-    $arr[$idx] = core::mem::MaybeUninit::new($e);
-    $idx += 1;
-    $crate::__init!($arr, $is_init, $idx => $($($tt)*)?);
-  }};
-  ($arr:ident, $is_init:ident, $idx:ident => $e:expr $(=> $($tt:tt)*)?) => {{
-    $crate::__init!($arr, $is_init, $idx => $e);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+
+    i - start
   }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __insert {
-  ($arr:ident, $is_init:ident, $start:expr, $end:expr, ($cmp:tt), |$i:tt| $v:expr) => {{
-    let start: Option<usize> = $start;
+  ($arr:ident, $total_len:expr, $start:expr, $end:expr, ($cmp:tt), |$i:tt| $v:expr) => {{
+    let start: __Option<__usize> = $start;
     let start = match start {
-        Some(x) => x,
-        None => 0,
+        __Some(x) => x,
+        __None => 0,
     };
 
-    let end: Option<usize> = $end;
+    let end: __Option<__usize> = $end;
     let end = match end {
-        Some(x) => x,
-        None => $arr.len(),
+        __Some(x) => x,
+        __None => $total_len,
     };
 
     let mut i = start;
     while i $cmp end {
-      extern crate core;
       // Closure execution is not allowed in const, so we make do.
-      $arr[i] = core::mem::MaybeUninit::new({ let $i = i; $v });
-      $is_init[i / (usize::BITS as usize)] |= (1 << (i % usize::BITS as usize));
+      $arr[i] = __MaybeUninit::new({ let $i = i; $v });
       i += 1;
     }
+
+    i - start
   }};
 }
 
@@ -325,79 +353,84 @@ macro_rules! __compute_dynamic_len {
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __parse_key {
-  ($arr:ident, $is_init:ident =>) => {};
+  ($cb:tt, $arr:ident, $total_len:expr =>) => {};
 
-  ($arr:ident, $is_init:ident => $a:tt.._: $v:expr $(, $($tt:tt)*)?) => {{
-    let v = $v;
-    let start: usize = $a;
-    let len: usize = v.len();
-    let end = start + len;
-    $crate::__insert!($arr, $is_init, Some(start), Some(end), (<), |i| $v[i - start]);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr => $a:tt.._: $v:expr $(, $($tt:tt)*)?) => {{
+    const START: __usize = $a;
+    let _v = $v;
+    let _len: __usize = _v.len();
+    $cb!($arr, $total_len, __Some(START), __Some(START + _len), (<), |_i| $v[_i - START]);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 
-  ($arr:ident, $is_init:ident => .._: $v:expr $(, $($tt:tt)*)?) => {{
-    let v = $v;
-    let start: usize = 0;
-    let len: usize = v.len();
-    let end = start + len;
-    $crate::__insert!($arr, $is_init, Some(start), Some(end), (<), |i| $v[i - start]);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr => .._: $v:expr $(, $($tt:tt)*)?) => {{
+    let _v = $v;
+    let _len: __usize = _v.len();
+    $cb!($arr, $total_len, __None, __Some(_len), (<), |_i| _v[_i]);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 
-  ($arr:ident, $is_init:ident => $a:tt..$b:tt: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, Some($a), Some($b), (<) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => $a:tt..$b:tt: $($tt:tt)*) => {{
+    const START: __usize = $a;
+    const END: __usize = $b;
+    $crate::__parse_value!($cb, $arr, $total_len, __Some(START), __Some(END), (<) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => $a:tt..=$b:tt: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, Some($a), Some($b), (<=) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => $a:tt..=$b:tt: $($tt:tt)*) => {{
+    const START: __usize = $a;
+    const END: __usize = $b;
+    $crate::__parse_value!($cb, $arr, $total_len, __Some(START), __Some(END), (<=) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => ..$b:tt: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, None, Some($b), (<) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => ..$b:tt: $($tt:tt)*) => {{
+    const END: __usize = $b;
+    $crate::__parse_value!($cb, $arr, $total_len, __None, __Some(END), (<) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => ..=$b:tt: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, None, Some($b), (<=) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => ..=$b:tt: $($tt:tt)*) => {{
+    const END: __usize = $b;
+    $crate::__parse_value!($cb, $arr, $total_len, __None, __Some(END), (<=) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => $a:tt..: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, Some($a), None, (<) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => $a:tt..: $($tt:tt)*) => {{
+    const START: __usize = $a;
+    $crate::__parse_value!($cb, $arr, $total_len, __Some(START), __None, (<) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => ..: $($tt:tt)*) => {{
-    $crate::__parse_value!($arr, $is_init, None, None, (<) => $($tt)*);
+  ($cb:tt, $arr:ident, $total_len:expr => ..: $($tt:tt)*) => {{
+    $crate::__parse_value!($cb, $arr, $total_len, __None, __None, (<) => $($tt)*);
   }};
 
-  ($arr:ident, $is_init:ident => $a:tt: $v:expr $(, $($tt:tt)*)?) => {{
-    extern crate core;
-    $arr[$a] = core::mem::MaybeUninit::new($v);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr => $a:tt: $v:expr $(, $($tt:tt)*)?) => {{
+    const START: __usize = $a;
+    let _v = $v;
+    $cb!($arr, $total_len, __Some(START), __Some(START + 1), (<), |_| _v);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 }
 
 #[doc(hidden)]
 #[macro_export]
 macro_rules! __parse_value {
-  ($arr:ident, $is_init:ident, $start:expr, $end:expr, ($cmp:tt) => |$i:tt| $v:expr $(, $($tt:tt)*)?) => {{
-    $crate::__insert!($arr, $is_init, $start, $end, ($cmp), |$i| $v);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr, $start:expr, $end:expr, ($cmp:tt) => |$i:tt| $v:expr $(, $($tt:tt)*)?) => {{
+    $cb!($arr, $total_len, $start, $end, ($cmp), |$i| $v);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 
-  ($arr:ident, $is_init:ident, $start:expr, $end:expr, ($cmp:tt) => [$e:expr; _] $(, $($tt:tt)*)?) => {{
-    let e = $e;
-    $crate::__insert!($arr, $is_init, $start, $end, ($cmp), |_| e);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+  ($cb:tt, $arr:ident, $total_len:expr, $start:expr, $end:expr, ($cmp:tt) => [$e:expr; _] $(, $($tt:tt)*)?) => {{
+    let _e = $e;
+    $cb!($arr, $total_len, $start, $end, ($cmp), |_| _e);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 
-  ($arr:ident, $is_init:ident, $start:expr, $end:expr, ($cmp:tt) => $v:expr $(, $($tt:tt)*)?) => {{
+  ($cb:tt, $arr:ident, $total_len:expr, $start:expr, $end:expr, ($cmp:tt) => $v:expr $(, $($tt:tt)*)?) => {{
     let v = $v;
     let start: usize = match $start {
-      Some(x) => x,
+      __Some(x) => x,
       _ => 0,
     };
-    $crate::__insert!($arr, $is_init, Some(start), $end, ($cmp), |i| v[i - start]);
-    $crate::__parse_key!($arr, $is_init => $($($tt)*)?);
+    $cb!($arr, $total_len, __Some(start), $end, ($cmp), |i| v[i - start]);
+    $crate::__parse_key!($cb, $arr, $total_len => $($($tt)*)?);
   }};
 }
 
